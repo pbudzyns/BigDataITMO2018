@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import UserDefinedFunction
-from pyspark.sql.functions import collect_set, array_contains
+from pyspark.sql.functions import collect_set, array_contains, col, max, mean, desc, sum
 from pyspark.sql.types import ArrayType
 import os
 
@@ -147,15 +147,6 @@ class SparkTask:
 
         user_wall_comments = self.read_parquet_file("userWallComments.parquet")
 
-
-        incoming_comments_count =user_wall_comments \
-            .filter(user_wall_comments['from_id'] != user_wall_comments['post_owner_id']) \
-            .groupBy('post_owner_id') \
-            .count() \
-            .withColumnRenamed('post_owner_id', 'UserId') \
-            .withColumnRenamed('count', 'comments_income')
-
-
         comments_by_post_count = user_wall_comments \
             .filter(user_wall_comments['from_id'] != user_wall_comments['post_owner_id']) \
             .select('post_id', 'post_owner_id') \
@@ -167,23 +158,9 @@ class SparkTask:
             .select('post_id', 'post_owner_id') \
             .dropDuplicates()
 
-        user_post_comments_summary = comment_to_user \
-            .join(comments_by_post_count, 'post_id') \
-            .groupBy('post_owner_id') \
-
-        max_comment = user_post_comments_summary \
-            .max('count') \
-            .withColumnRenamed('post_owner_id', 'UserId') \
-            .withColumnRenamed('max(count)', 'max_per_post')
-
-        mean_comment = user_post_comments_summary \
-            .mean('count') \
-            .withColumnRenamed('post_owner_id', 'UserId') \
-            .withColumnRenamed('avg(count)', 'mean_per_post')
-
-        result_table = incoming_comments_count \
-            .join(max_comment, 'UserId') \
-            .join(mean_comment, 'UserId')
+        result_table = comment_to_user\
+            .join(comments_by_post_count, "post_id")\
+            .groupBy("post_owner_id").agg(sum("count"), max("count"), mean("count"))
 
         return result_table
 
@@ -202,26 +179,10 @@ class SparkTask:
             .select('itemId', 'ownerId') \
             .dropDuplicates()
 
-        user_likes_summary = post_to_user.join(likes_per_post, 'itemId').groupBy('ownerId')
-
-        total_likes_per_post = user_likes_summary \
-            .sum('count') \
-            .withColumnRenamed('ownerId', 'UserId') \
-            .withColumnRenamed('sum(count)', 'total_likes')
-
-        max_likes_per_post = user_likes_summary \
-            .max('count') \
-            .withColumnRenamed('ownerId', 'UserId') \
-            .withColumnRenamed('max(count)', 'max_per_post')
-
-        mean_likes_per_post = user_likes_summary \
-            .mean('count') \
-            .withColumnRenamed('ownerId', 'UserId') \
-            .withColumnRenamed('avg(count)', 'mean_per_post')
-
-        result_table = total_likes_per_post \
-            .join(max_likes_per_post, 'UserId') \
-            .join(mean_likes_per_post, 'UserId')
+        result_table = post_to_user\
+            .join(likes_per_post, 'itemId')\
+            .groupBy('ownerId')\
+            .agg(sum('count'), max('count'), mean('count'))
 
         return result_table
 
@@ -273,7 +234,9 @@ class SparkTask:
             .count()\
             .withColumnRenamed("count", "closed")
 
-        result_table = opened_groups.join(closed_groups, "user")
+        result_table = opened_groups\
+            .join(closed_groups, "user", how="full_outer")\
+            .fillna(0)
 
         return result_table
 
@@ -325,11 +288,120 @@ class SparkTask:
             .count()\
             .withColumnRenamed("count", "not_from_subscribed")
 
-        result_table = reposts_from_subscribed.join(reposts_not_from_subscribed, 'user')
+        result_table = reposts_from_subscribed\
+            .join(reposts_not_from_subscribed, 'user', how="full_outer")\
+            .fillna(0)
 
         return result_table
 
+    def task2b(self):
+        """2) count of deleted users in friends and followers"""
 
+        friends = self.read_parquet_file("friends.parquet")
+        followers = self.read_parquet_file("followers.parquet")
+
+        friendsProfiles = self.read_parquet_file("friendsProfiles.parquet")
+        followersProfiles = self.read_parquet_file("followerProfiles.parquet")
+
+        deleted_friends_profiles = friendsProfiles\
+            .filter(friendsProfiles.deactivated == "deleted")\
+            .select("id", "deactivated")\
+            .withColumnRenamed("id", "follower")
+
+        deleted_follower_profiles = followersProfiles\
+            .filter(followersProfiles.deactivated == "deleted")\
+            .select("id", "deactivated")\
+            .withColumnRenamed("id", "follower")
+
+        deleted_friends = friends\
+            .join(deleted_friends_profiles, "follower", how="inner")\
+            .select('profile', 'deactivated')\
+            .dropDuplicates()\
+            .groupBy('profile')\
+            .count()\
+            .withColumnRenamed('count', 'deleted_fiends_acc')
+
+        deleted_followers = followers\
+            .join(deleted_follower_profiles, "follower", how="inner")\
+            .select("profile", "deactivated")\
+            .dropDuplicates()\
+            .groupBy("profile")\
+            .count()\
+            .withColumnRenamed("count", "deleted_followers_acc")
+
+        result_table = deleted_friends\
+            .join(deleted_followers, "profile", how="full_outer")\
+            .fillna(0)
+
+        return result_table
+
+    def task3b(self):
+        """3) aggregate (e.g. count, max, mean) characteristics for comments and likes (separtely) made by (a) friends
+            and (b) followers per post"""
+        pass
+
+    def task4b_friends(self):
+        """3) aggregate (e.g. count, max, mean) characteristics for comments and likes (separtely) made by (a) friends
+            and (b) followers per user"""
+
+        friends = self.read_parquet_file("friends.parquet")
+
+        # userWallPosts = self.read_parquet_file("userWallPosts.parquet")
+        userWallComments = self.read_parquet_file("userWallComments.parquet")
+        userWallLikes = self.read_parquet_file("userWallLikes.parquet")
+
+        user_friends = friends\
+            .groupBy("profile")\
+            .agg(collect_set("follower"))\
+            .withColumnRenamed("collect_set(follower)", "friends")\
+            .select("profile", "friends")
+
+        comments = userWallComments.select("post_owner_id", "from_id", "post_id")
+
+        def contains(id, groups):
+            if not groups:
+                return False
+            if str(id) in groups:
+                return True
+            else:
+                return False
+
+        contains_udf = UserDefinedFunction(contains)
+
+        post_comment_to_relation = comments\
+            .withColumnRenamed("post_owner_id", "profile")\
+            .join(user_friends, "profile", how="left_outer")\
+            .withColumn("is_from_friend", contains_udf(col("from_id"), col("friends")))\
+            .select("profile", "is_from_friend", "post_id")\
+            .filter(col("is_from_friend") == "true")\
+
+        comments_from_friends_per_post = post_comment_to_relation\
+            .groupBy("post_id")\
+            .count()
+
+        result_table = post_comment_to_relation\
+            .select("profile", "post_id")\
+            .join(comments_from_friends_per_post, "post_id")\
+            .groupBy("profile")\
+            .agg(max("count"), mean("count"), sum("count"))\
+            .sort(desc("sum(count)"))
+
+        result_table.show()
+
+    def task4b_followers(self):
+        followers = self.read_parquet_file("followers.parquet")
+
+        user_followers = followers\
+            .groupBy("profile")\
+            .agg(collect_set("follower"))\
+            .withColumnRenamed("collect_set(follower)", "followers")\
+            .select("profile", "followers")
+
+
+    def task5b(self):
+        """5) find emoji (separately, count of: all, negative, positive, others) in
+            (a) user's posts (b) user's comments """
+        pass
 
 
 if __name__ == "__main__":
@@ -337,9 +409,11 @@ if __name__ == "__main__":
     # spark.task1a().show()
     # spark.task2a().show()
     # spark.task3a().show()
-    # spark.task4a().show()
+    spark.task4a().show()
     # spark.task5a().show()
     # spark.task6a().show()
     # spark.task7a().show()
     # spark.task1b().show()
+    # spark.task2b().show()
+    # spark.task4b_friends()
     # print(res.show())
